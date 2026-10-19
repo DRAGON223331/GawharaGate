@@ -46,6 +46,7 @@ public final class GatePlugin extends JavaPlugin implements Listener, TabExecuto
     private BukkitTask recheck;
     private boolean configured;
     private boolean warnedUnconfigured;
+    private volatile boolean commandsRegistered;
 
     /** معرّف ديسكورد ← وقت انتهاء صلاحية نتيجة التحقق الناجحة. */
     private final Map<String, Long> memberCache = new ConcurrentHashMap<>();
@@ -84,6 +85,7 @@ public final class GatePlugin extends JavaPlugin implements Listener, TabExecuto
         api = new DiscordApi(token, guild, getLogger());
         gateway = new DiscordGateway(token, this, getLogger());
         gateway.start();
+        Bukkit.getScheduler().runTaskAsynchronously(this, this::registerCommands);
 
         int minutes = getConfig().getInt("recheck-minutes", 10);
         if (minutes > 0) {
@@ -227,14 +229,30 @@ public final class GatePlugin extends JavaPlugin implements Listener, TabExecuto
 
     @Override
     public void onReady(String applicationId) {
+        registerWith(applicationId);
+    }
+
+    /** تسجيل أمر الربط (يُستدعى خارج الخيط الرئيسي). */
+    private boolean registerCommands() {
         DiscordApi a = api;
         if (a == null) {
-            return;
+            return false;
         }
-        a.registerLinkCommand(applicationId,
+        String appId = a.fetchApplicationId();
+        return appId != null && registerWith(appId);
+    }
+
+    private boolean registerWith(String applicationId) {
+        DiscordApi a = api;
+        if (a == null) {
+            return false;
+        }
+        boolean ok = a.registerLinkCommand(applicationId,
                 getConfig().getString("link-command-name", "link"),
                 getConfig().getString("messages.command-description", "ربط الحساب"),
                 getConfig().getString("messages.option-description", "الرمز"));
+        commandsRegistered = ok;
+        return ok;
     }
 
     @Override
@@ -334,8 +352,23 @@ public final class GatePlugin extends JavaPlugin implements Listener, TabExecuto
                     recheckOnline(sender);
                 }
             }
+            case "register" -> {
+                if (!configured) {
+                    sender.sendMessage(Component.text("الإضافة غير مضبوطة بعد (رمز البوت مفقود)."));
+                } else {
+                    sender.sendMessage(Component.text("جارٍ تسجيل الأوامر في ديسكورد..."));
+                    Bukkit.getScheduler().runTaskAsynchronously(this, () -> {
+                        boolean ok = registerCommands();
+                        Bukkit.getScheduler().runTask(this, () -> sender.sendMessage(Component.text(ok
+                                ? "تم تسجيل الأمر /" + getConfig().getString("link-command-name", "link")
+                                + " في ديسكورد. قد تحتاج إلى إعادة فتح ديسكورد ليظهر."
+                                : "فشل التسجيل، راجع سجل السيرفر (console) لمعرفة السبب.")));
+                    });
+                }
+            }
             case "status" -> sender.sendMessage(Component.text(
                     "الحالة: " + (configured ? "مفعّلة" : "غير مضبوطة (لا يُفرض الشرط)")
+                            + " | تسجيل الأمر في ديسكورد: " + (commandsRegistered ? "تم" : "لم يتم")
                             + " | عدد الحسابات المربوطة: " + store.total()));
             case "check" -> {
                 OfflinePlayer op = target(sender, args);
@@ -378,7 +411,7 @@ public final class GatePlugin extends JavaPlugin implements Listener, TabExecuto
                     }
                 }
             }
-            default -> sender.sendMessage(Component.text("الاستخدام: /gate <reload|status|scan|check|link|unlink>"));
+            default -> sender.sendMessage(Component.text("الاستخدام: /gate <reload|status|register|scan|check|link|unlink>"));
         }
         return true;
     }
@@ -399,13 +432,14 @@ public final class GatePlugin extends JavaPlugin implements Listener, TabExecuto
     public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
         List<String> out = new ArrayList<>();
         if (args.length == 1) {
-            for (String s : List.of("reload", "status", "scan", "check", "link", "unlink")) {
+            for (String s : List.of("reload", "status", "register", "scan", "check", "link", "unlink")) {
                 if (s.startsWith(args[0].toLowerCase(Locale.ROOT))) {
                     out.add(s);
                 }
             }
         } else if (args.length == 2 && !args[0].equalsIgnoreCase("reload") && !args[0].equalsIgnoreCase("status")
-                && !args[0].equalsIgnoreCase("scan")) {
+                && !args[0].equalsIgnoreCase("scan")
+                && !args[0].equalsIgnoreCase("register")) {
             for (Player p : Bukkit.getOnlinePlayers()) {
                 if (p.getName().toLowerCase(Locale.ROOT).startsWith(args[1].toLowerCase(Locale.ROOT))) {
                     out.add(p.getName());

@@ -81,8 +81,26 @@ final class DiscordApi {
         }
     }
 
+    /** معرّف التطبيق (البوت) عبر REST دون الحاجة إلى اتصال البوابة. */
+    String fetchApplicationId() {
+        try {
+            HttpResponse<String> r = HTTP.send(req("/oauth2/applications/@me").GET().build(),
+                    HttpResponse.BodyHandlers.ofString());
+            if (r.statusCode() == 200) {
+                return JsonParser.parseString(r.body()).getAsJsonObject().get("id").getAsString();
+            }
+            log.severe("تعذّر قراءة بيانات البوت من ديسكورد: HTTP " + r.statusCode()
+                    + " — تحقق من رمز البوت (discord.bot-token).");
+        } catch (InterruptedException ex) {
+            Thread.currentThread().interrupt();
+        } catch (Exception ex) {
+            log.warning("تعذّر قراءة بيانات البوت: " + ex.getMessage());
+        }
+        return null;
+    }
+
     /** تسجيل أمر الربط داخل خادم ديسكورد. */
-    void registerLinkCommand(String appId, String name, String description, String optionDescription) {
+    boolean registerLinkCommand(String appId, String name, String description, String optionDescription) {
         JsonObject opt = new JsonObject();
         opt.addProperty("type", 3);
         opt.addProperty("name", "code");
@@ -104,16 +122,18 @@ final class DiscordApi {
                             .build(),
                     HttpResponse.BodyHandlers.ofString());
             if (r.statusCode() / 100 != 2) {
-                log.warning("تعذّر تسجيل أمر الربط في ديسكورد: HTTP " + r.statusCode() + " " + r.body()
-                        + " (تأكد من دعوة البوت بنطاق applications.commands)");
-            } else {
-                log.info("تم تسجيل أمر /" + name + " في ديسكورد.");
+                log.severe("تعذّر تسجيل أمر الربط في ديسكورد: HTTP " + r.statusCode() + " " + r.body()
+                        + " — أعد دعوة البوت إلى الخادم بنطاقي bot و applications.commands، وتحقق من guild-id.");
+                return false;
             }
+            log.info("تم تسجيل أمر /" + name + " في ديسكورد.");
+            return true;
         } catch (InterruptedException ex) {
             Thread.currentThread().interrupt();
         } catch (Exception ex) {
             log.warning("تعذّر تسجيل أمر الربط: " + ex.getMessage());
         }
+        return false;
     }
 
     /** رد مخفي (لا يراه سوى صاحب الأمر) على تفاعل. */

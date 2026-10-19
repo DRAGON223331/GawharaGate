@@ -201,6 +201,7 @@ final class DiscordGateway implements WebSocket.Listener {
                 JsonObject d = o.has("d") && o.get("d").isJsonObject() ? o.getAsJsonObject("d") : new JsonObject();
                 if (t.equals("READY")) {
                     failures = 0;
+                    log.info("اتصل البوت ببوابة ديسكورد بنجاح.");
                     String appId = d.getAsJsonObject("application").get("id").getAsString();
                     work.execute(() -> handler.onReady(appId));
                 } else if (t.equals("INTERACTION_CREATE")) {
