@@ -1,0 +1,16 @@
+name: GawharaGate
+version: 1.0.0
+main: net.gawhara.gate.GatePlugin
+api-version: '26.1'
+author: GawharaSMP
+description: اشتراط عضوية اللاعب في خادم ديسكورد «البرج» للدخول إلى خادم ماينكرافت، مع ربط الحسابين
+commands:
+  gate:
+    description: إدارة إضافة بوابة ديسكورد
+    usage: /gate <reload|status|check|link|unlink> [اللاعب] [معرّف ديسكورد]
+    aliases: [gawharagate, dgate]
+    permission: gawharagate.admin
+permissions:
+  gawharagate.admin:
+    description: التحكم في إضافة بوابة ديسكورد
+    default: op
