@@ -23,6 +23,8 @@ final class DiscordGateway implements WebSocket.Listener {
         void onReady(String applicationId);
 
         void onInteraction(JsonObject data);
+
+        void onMessage(JsonObject data);
     }
 
     private static final HttpClient HTTP = HttpClient.newBuilder()
@@ -30,6 +32,7 @@ final class DiscordGateway implements WebSocket.Listener {
             .build();
 
     private final String token;
+    private final int intents;
     private final Handler handler;
     private final Logger log;
 
@@ -52,8 +55,9 @@ final class DiscordGateway implements WebSocket.Listener {
     private int failures;
     private final java.util.concurrent.atomic.AtomicBoolean reconnecting = new java.util.concurrent.atomic.AtomicBoolean();
 
-    DiscordGateway(String token, Handler handler, Logger log) {
+    DiscordGateway(String token, int intents, Handler handler, Logger log) {
         this.token = token;
+        this.intents = intents;
         this.handler = handler;
         this.log = log;
     }
@@ -141,7 +145,7 @@ final class DiscordGateway implements WebSocket.Listener {
         props.addProperty("device", "gawhara-gate");
         JsonObject d = new JsonObject();
         d.addProperty("token", token);
-        d.addProperty("intents", 0);
+        d.addProperty("intents", intents);
         d.add("properties", props);
         JsonObject o = new JsonObject();
         o.addProperty("op", 2);
@@ -206,6 +210,8 @@ final class DiscordGateway implements WebSocket.Listener {
                     work.execute(() -> handler.onReady(appId));
                 } else if (t.equals("INTERACTION_CREATE")) {
                     work.execute(() -> handler.onInteraction(d));
+                } else if (t.equals("MESSAGE_CREATE")) {
+                    work.execute(() -> handler.onMessage(d));
                 }
             }
             default -> { }
@@ -223,7 +229,8 @@ final class DiscordGateway implements WebSocket.Listener {
             return null;
         }
         if (statusCode == 4013 || statusCode == 4014) {
-            log.severe("رفضت ديسكورد الصلاحيات المطلوبة (" + statusCode + ").");
+            log.severe("رفضت ديسكورد الصلاحيات المطلوبة (" + statusCode + "). إن فعّلت قناة الربط (link.channel-id) "
+                    + "فشغّل Message Content Intent من Developer Portal ← Bot، أو اتركها فارغة واستخدم الرسائل الخاصة فقط.");
             stopped = true;
             return null;
         }

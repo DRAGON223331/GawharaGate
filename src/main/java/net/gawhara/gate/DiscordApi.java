@@ -113,14 +113,30 @@ final class DiscordApi {
         cmd.addProperty("type", 1);
         cmd.addProperty("description", description);
         cmd.add("options", opts);
-        JsonArray body = new JsonArray();
-        body.add(cmd);
+        // POST ينشئ أو يحدّث هذا الأمر وحده دون المساس ببقية أوامر البوت (على خلاف PUT الذي يستبدلها كلها)
+        JsonObject body = cmd;
         try {
-            HttpResponse<String> r = HTTP.send(
-                    req("/applications/" + appId + "/guilds/" + guildId + "/commands")
-                            .PUT(HttpRequest.BodyPublishers.ofString(body.toString(), StandardCharsets.UTF_8))
-                            .build(),
-                    HttpResponse.BodyHandlers.ofString());
+            HttpResponse<String> r = null;
+            for (int attempt = 0; attempt < 3; attempt++) {
+                r = HTTP.send(
+                        req("/applications/" + appId + "/guilds/" + guildId + "/commands")
+                                .POST(HttpRequest.BodyPublishers.ofString(body.toString(), StandardCharsets.UTF_8))
+                                .build(),
+                        HttpResponse.BodyHandlers.ofString());
+                if (r.statusCode() != 429) {
+                    break;
+                }
+                // حدّ الطلبات: ننتظر المدة التي حدّدتها ديسكورد ثم نعيد المحاولة
+                double wait = 5;
+                try {
+                    wait = JsonParser.parseString(r.body()).getAsJsonObject().get("retry_after").getAsDouble();
+                } catch (RuntimeException ignored) {
+                    // نستخدم القيمة الافتراضية
+                }
+                wait = Math.min(60, wait) + 1;
+                log.info("ديسكورد طلب الانتظار " + (int) wait + " ثانية قبل تسجيل الأمر، سنعيد المحاولة تلقائيًا...");
+                Thread.sleep((long) (wait * 1000));
+            }
             if (r.statusCode() / 100 != 2) {
                 log.severe("تعذّر تسجيل أمر الربط في ديسكورد: HTTP " + r.statusCode() + " " + r.body()
                         + " — أعد دعوة البوت إلى الخادم بنطاقي bot و applications.commands، وتحقق من guild-id.");
@@ -134,6 +150,35 @@ final class DiscordApi {
             log.warning("تعذّر تسجيل أمر الربط: " + ex.getMessage());
         }
         return false;
+    }
+
+    /** إرسال رسالة نصية إلى قناة (أو رسالة خاصة)، مع رد اختياري على رسالة. */
+    void sendMessage(String channelId, String content, String replyToMessageId) {
+        JsonObject body = new JsonObject();
+        body.addProperty("content", content);
+        JsonObject mentions = new JsonObject();
+        mentions.add("parse", new JsonArray());
+        body.add("allowed_mentions", mentions);
+        if (replyToMessageId != null) {
+            JsonObject ref = new JsonObject();
+            ref.addProperty("message_id", replyToMessageId);
+            ref.addProperty("fail_if_not_exists", false);
+            body.add("message_reference", ref);
+        }
+        try {
+            HttpResponse<String> r = HTTP.send(
+                    req("/channels/" + channelId + "/messages")
+                            .POST(HttpRequest.BodyPublishers.ofString(body.toString(), StandardCharsets.UTF_8))
+                            .build(),
+                    HttpResponse.BodyHandlers.ofString());
+            if (r.statusCode() / 100 != 2) {
+                log.warning("تعذّر إرسال الرد في ديسكورد: HTTP " + r.statusCode() + " " + r.body());
+            }
+        } catch (InterruptedException ex) {
+            Thread.currentThread().interrupt();
+        } catch (Exception ex) {
+            log.warning("تعذّر إرسال الرد في ديسكورد: " + ex.getMessage());
+        }
     }
 
     /** رد مخفي (لا يراه سوى صاحب الأمر) على تفاعل. */

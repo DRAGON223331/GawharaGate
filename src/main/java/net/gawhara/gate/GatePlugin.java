@@ -77,15 +77,25 @@ public final class GatePlugin extends JavaPlugin implements Listener, TabExecuto
         String guild = getConfig().getString("discord.guild-id", "").trim();
         configured = !token.isEmpty() && !guild.isEmpty();
         memberCache.clear();
+        commandsRegistered = false;
         if (!configured) {
             getLogger().warning("لم يُضبط discord.bot-token أو discord.guild-id في config.yml، "
                     + "لذلك لن يُفرض شرط ديسكورد حاليًا (يُسمح للجميع بالدخول).");
             return;
         }
         api = new DiscordApi(token, guild, getLogger());
-        gateway = new DiscordGateway(token, this, getLogger());
+        int intents = 0;
+        if (getConfig().getBoolean("link.dm", true)) {
+            intents |= 1 << 12;                 // DIRECT_MESSAGES (لا يحتاج صلاحية خاصة)
+        }
+        if (!getConfig().getString("link.channel-id", "").isBlank()) {
+            intents |= (1 << 9) | (1 << 15);    // GUILD_MESSAGES + MESSAGE_CONTENT (يلزم تفعيله من Developer Portal)
+        }
+        gateway = new DiscordGateway(token, intents, this, getLogger());
         gateway.start();
-        Bukkit.getScheduler().runTaskAsynchronously(this, this::registerCommands);
+        if (getConfig().getBoolean("link.slash-command", false)) {
+            Bukkit.getScheduler().runTaskAsynchronously(this, () -> registerCommands(false));
+        }
 
         int minutes = getConfig().getInt("recheck-minutes", 10);
         if (minutes > 0) {
@@ -150,9 +160,28 @@ public final class GatePlugin extends JavaPlugin implements Listener, TabExecuto
         }
     }
 
+    /** نص طريقة الربط المناسبة حسب الإعدادات. */
+    private String howText() {
+        if (getConfig().getBoolean("link.slash-command", false)) {
+            return getConfig().getString("messages.how-slash", "");
+        }
+        boolean hasChannel = !getConfig().getString("link.channel-id", "").isBlank();
+        boolean hasDm = getConfig().getBoolean("link.dm", true);
+        if (hasChannel && hasDm) {
+            return getConfig().getString("messages.how-both", "");
+        }
+        if (hasChannel) {
+            return getConfig().getString("messages.how-channel", "");
+        }
+        return getConfig().getString("messages.how-dm", "");
+    }
+
     private Component message(String key, String code) {
         List<String> lines = getConfig().getStringList("messages." + key);
         String text = String.join("\n", lines)
+                .replace("{how}", howText())
+                .replace("{bot}", getConfig().getString("link.bot-name", "البوت"))
+                .replace("{channel}", getConfig().getString("link.channel-name", "قناة الربط"))
                 .replace("{server}", getConfig().getString("discord.guild-name", "ديسكورد"))
                 .replace("{invite}", getConfig().getString("discord.invite-url", ""))
                 .replace("{command}", getConfig().getString("link-command-name", "link"))
@@ -229,23 +258,29 @@ public final class GatePlugin extends JavaPlugin implements Listener, TabExecuto
 
     @Override
     public void onReady(String applicationId) {
-        registerWith(applicationId);
+        if (getConfig().getBoolean("link.slash-command", false)) {
+            registerWith(applicationId, false);
+        }
     }
 
     /** تسجيل أمر الربط (يُستدعى خارج الخيط الرئيسي). */
-    private boolean registerCommands() {
+    private boolean registerCommands(boolean force) {
         DiscordApi a = api;
         if (a == null) {
             return false;
         }
         String appId = a.fetchApplicationId();
-        return appId != null && registerWith(appId);
+        return appId != null && registerWith(appId, force);
     }
 
-    private boolean registerWith(String applicationId) {
+    /** متزامن حتى لا يُرسل طلب التسجيل مرتين في وقت واحد (يتسبب بحدّ الطلبات). */
+    private synchronized boolean registerWith(String applicationId, boolean force) {
         DiscordApi a = api;
         if (a == null) {
             return false;
+        }
+        if (commandsRegistered && !force) {
+            return true;
         }
         boolean ok = a.registerLinkCommand(applicationId,
                 getConfig().getString("link-command-name", "link"),
@@ -297,6 +332,58 @@ public final class GatePlugin extends JavaPlugin implements Listener, TabExecuto
         } catch (RuntimeException ex) {
             getLogger().warning("تعذّر معالجة أمر ديسكورد: " + ex.getMessage());
         }
+    }
+
+    @Override
+    public void onMessage(JsonObject d) {
+        DiscordApi a = api;
+        if (a == null || !d.has("author") || !d.has("channel_id") || !d.has("id")) {
+            return;
+        }
+        try {
+            JsonObject author = d.getAsJsonObject("author");
+            if (author.has("bot") && author.get("bot").getAsBoolean()) {
+                return;
+            }
+            String userId = author.get("id").getAsString();
+            String channelId = d.get("channel_id").getAsString();
+            String messageId = d.get("id").getAsString();
+            String content = d.has("content") ? d.get("content").getAsString().trim() : "";
+            boolean isDm = !d.has("guild_id");
+            String linkChannel = getConfig().getString("link.channel-id", "").trim();
+
+            if (isDm) {
+                if (!getConfig().getBoolean("link.dm", true)) {
+                    return;
+                }
+            } else if (linkChannel.isEmpty() || !channelId.equals(linkChannel)) {
+                return;
+            }
+            String code = content.replaceAll("[^A-Za-z0-9]", "");
+            boolean looksLikeCode = content.matches("(?i)^[A-Z0-9]{6}$");
+            if (!isDm && !looksLikeCode) {
+                return; // لا نرد على الأحاديث العادية في قناة الربط
+            }
+            String replyTo = isDm ? null : messageId;
+            if (!looksLikeCode) {
+                a.sendMessage(channelId, text("link-dm-help"), replyTo);
+                return;
+            }
+            // يجب أن يكون صاحب الرسالة عضوًا في خادم ديسكورد (الرسالة الخاصة لا تثبت ذلك وحدها)
+            if (a.check(userId) != DiscordApi.Membership.MEMBER) {
+                a.sendMessage(channelId, plain("link-not-member"), replyTo);
+                return;
+            }
+            a.sendMessage(channelId, handleLink(userId, code.toUpperCase()), replyTo);
+        } catch (RuntimeException ex) {
+            getLogger().warning("تعذّر معالجة رسالة ديسكورد: " + ex.getMessage());
+        }
+    }
+
+    private String plain(String key) {
+        return getConfig().getString("messages." + key, key)
+                .replace("{server}", getConfig().getString("discord.guild-name", "ديسكورد"))
+                .replace("{invite}", getConfig().getString("discord.invite-url", ""));
     }
 
     private String text(String key) {
@@ -358,7 +445,7 @@ public final class GatePlugin extends JavaPlugin implements Listener, TabExecuto
                 } else {
                     sender.sendMessage(Component.text("جارٍ تسجيل الأوامر في ديسكورد..."));
                     Bukkit.getScheduler().runTaskAsynchronously(this, () -> {
-                        boolean ok = registerCommands();
+                        boolean ok = registerCommands(true);
                         Bukkit.getScheduler().runTask(this, () -> sender.sendMessage(Component.text(ok
                                 ? "تم تسجيل الأمر /" + getConfig().getString("link-command-name", "link")
                                 + " في ديسكورد. قد تحتاج إلى إعادة فتح ديسكورد ليظهر."
