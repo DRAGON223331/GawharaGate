@@ -88,7 +88,7 @@ public final class GatePlugin extends JavaPlugin implements Listener, TabExecuto
         int minutes = getConfig().getInt("recheck-minutes", 10);
         if (minutes > 0) {
             long ticks = minutes * 60L * 20L;
-            recheck = Bukkit.getScheduler().runTaskTimer(this, this::recheckOnline, ticks, ticks);
+            recheck = Bukkit.getScheduler().runTaskTimer(this, () -> recheckOnline(null), ticks, ticks);
         }
     }
 
@@ -181,7 +181,7 @@ public final class GatePlugin extends JavaPlugin implements Listener, TabExecuto
     }
 
     /** فحص دوري للمتصلين: طرد من غادر ديسكورد. */
-    private void recheckOnline() {
+    private void recheckOnline(CommandSender requester) {
         List<UUID> ids = new ArrayList<>();
         List<String> names = new ArrayList<>();
         for (Player p : Bukkit.getOnlinePlayers()) {
@@ -189,21 +189,36 @@ public final class GatePlugin extends JavaPlugin implements Listener, TabExecuto
             names.add(p.getName());
         }
         if (ids.isEmpty()) {
+            if (requester != null) {
+                requester.sendMessage(Component.text("لا يوجد لاعبون متصلون للفحص."));
+            }
             return;
         }
         Bukkit.getScheduler().runTaskAsynchronously(this, () -> {
+            int kicked = 0;
+            int errors = 0;
             for (int i = 0; i < ids.size(); i++) {
                 UUID id = ids.get(i);
                 Decision d = decide(id, names.get(i));
                 // لا نطرد المتصلين بسبب أعطال ديسكورد، بل عند ثبوت المغادرة أو عدم الربط فقط
                 if (d.kind() == Kind.NOT_MEMBER || d.kind() == Kind.NEED_LINK) {
+                    kicked++;
                     Bukkit.getScheduler().runTask(this, () -> {
                         Player p = Bukkit.getPlayer(id);
                         if (p != null) {
                             p.kick(kickMessage(d));
                         }
                     });
+                } else if (d.kind() == Kind.ERROR) {
+                    errors++;
                 }
+            }
+            if (requester != null) {
+                final int k = kicked;
+                final int er = errors;
+                final int total = ids.size();
+                Bukkit.getScheduler().runTask(this, () -> requester.sendMessage(Component.text(
+                        "اكتمل الفحص: " + total + " لاعب، طُرد " + k + (er > 0 ? "، وتعذّر التحقق من " + er : "") + ".")));
             }
         });
     }
@@ -311,6 +326,14 @@ public final class GatePlugin extends JavaPlugin implements Listener, TabExecuto
                 startDiscord();
                 sender.sendMessage(Component.text("تمت إعادة تحميل الإعدادات والاتصال بديسكورد."));
             }
+            case "scan" -> {
+                if (!configured) {
+                    sender.sendMessage(Component.text("الإضافة غير مضبوطة بعد (رمز البوت مفقود)."));
+                } else {
+                    sender.sendMessage(Component.text("جارٍ فحص اللاعبين المتصلين..."));
+                    recheckOnline(sender);
+                }
+            }
             case "status" -> sender.sendMessage(Component.text(
                     "الحالة: " + (configured ? "مفعّلة" : "غير مضبوطة (لا يُفرض الشرط)")
                             + " | عدد الحسابات المربوطة: " + store.total()));
@@ -355,7 +378,7 @@ public final class GatePlugin extends JavaPlugin implements Listener, TabExecuto
                     }
                 }
             }
-            default -> sender.sendMessage(Component.text("الاستخدام: /gate <reload|status|check|link|unlink>"));
+            default -> sender.sendMessage(Component.text("الاستخدام: /gate <reload|status|scan|check|link|unlink>"));
         }
         return true;
     }
@@ -376,12 +399,13 @@ public final class GatePlugin extends JavaPlugin implements Listener, TabExecuto
     public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
         List<String> out = new ArrayList<>();
         if (args.length == 1) {
-            for (String s : List.of("reload", "status", "check", "link", "unlink")) {
+            for (String s : List.of("reload", "status", "scan", "check", "link", "unlink")) {
                 if (s.startsWith(args[0].toLowerCase(Locale.ROOT))) {
                     out.add(s);
                 }
             }
-        } else if (args.length == 2 && !args[0].equalsIgnoreCase("reload") && !args[0].equalsIgnoreCase("status")) {
+        } else if (args.length == 2 && !args[0].equalsIgnoreCase("reload") && !args[0].equalsIgnoreCase("status")
+                && !args[0].equalsIgnoreCase("scan")) {
             for (Player p : Bukkit.getOnlinePlayers()) {
                 if (p.getName().toLowerCase(Locale.ROOT).startsWith(args[1].toLowerCase(Locale.ROOT))) {
                     out.add(p.getName());

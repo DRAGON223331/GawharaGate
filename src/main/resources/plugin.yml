@@ -7,7 +7,7 @@ description: اشتراط عضوية اللاعب في خادم ديسكورد �
 commands:
   gate:
     description: إدارة إضافة بوابة ديسكورد
-    usage: /gate <reload|status|check|link|unlink> [اللاعب] [معرّف ديسكورد]
+    usage: /gate <reload|status|scan|check|link|unlink> [اللاعب] [معرّف ديسكورد]
     aliases: [gawharagate, dgate]
     permission: gawharagate.admin
 permissions:
