@@ -359,8 +359,8 @@ public final class GatePlugin extends JavaPlugin implements Listener, TabExecuto
             } else if (linkChannel.isEmpty() || !channelId.equals(linkChannel)) {
                 return;
             }
-            String code = content.replaceAll("[^A-Za-z0-9]", "");
-            boolean looksLikeCode = content.matches("(?i)^[A-Z0-9]{6}$");
+            String code = extractCode(content, isDm);
+            boolean looksLikeCode = code != null;
             if (!isDm && !looksLikeCode) {
                 return; // لا نرد على الأحاديث العادية في قناة الربط
             }
@@ -370,7 +370,13 @@ public final class GatePlugin extends JavaPlugin implements Listener, TabExecuto
                 return;
             }
             // يجب أن يكون صاحب الرسالة عضوًا في خادم ديسكورد (الرسالة الخاصة لا تثبت ذلك وحدها)
-            if (a.check(userId) != DiscordApi.Membership.MEMBER) {
+            DiscordApi.Membership m = a.check(userId);
+            if (m == DiscordApi.Membership.ERROR) {
+                a.sendMessage(channelId, textOr("link-error",
+                        "تعذّر التحقق من عضويتك في ديسكورد الآن، أعد إرسال الرمز بعد قليل."), replyTo);
+                return;
+            }
+            if (m != DiscordApi.Membership.MEMBER) {
                 a.sendMessage(channelId, plain("link-not-member"), replyTo);
                 return;
             }
@@ -378,6 +384,38 @@ public final class GatePlugin extends JavaPlugin implements Listener, TabExecuto
         } catch (RuntimeException ex) {
             getLogger().warning("تعذّر معالجة رسالة ديسكورد: " + ex.getMessage());
         }
+    }
+
+    /** يستخرج رمز الربط من الرسالة: في الرسائل الخاصة يُقبل الرمز وسط نص، وفي القناة يلزم أن تكون الرسالة هي الرمز فقط. */
+    private String extractCode(String content, boolean isDm) {
+        if (content == null || content.isBlank()) {
+            return null;
+        }
+        if (!isDm) {
+            String c = content.replaceAll("[`*_~\\s]", "");
+            return c.matches("(?i)[A-Z0-9]{6}") ? c.toUpperCase(Locale.ROOT) : null;
+        }
+        String stripped = content.replaceAll("[^A-Za-z0-9]", "");
+        if (stripped.length() == 6) {
+            return stripped.toUpperCase(Locale.ROOT);
+        }
+        String fallback = null;
+        for (String tok : content.split("[^A-Za-z0-9]+")) {
+            if (tok.length() == 6) {
+                String up = tok.toUpperCase(Locale.ROOT);
+                if (store.peek(up) != null) {
+                    return up;
+                }
+                if (fallback == null) {
+                    fallback = up;
+                }
+            }
+        }
+        return fallback;
+    }
+
+    private String textOr(String key, String def) {
+        return getConfig().getString("messages." + key, def);
     }
 
     private String plain(String key) {
@@ -455,6 +493,7 @@ public final class GatePlugin extends JavaPlugin implements Listener, TabExecuto
             }
             case "status" -> sender.sendMessage(Component.text(
                     "الحالة: " + (configured ? "مفعّلة" : "غير مضبوطة (لا يُفرض الشرط)")
+                            + " | البوابة: " + (gateway == null ? "غير مشغّلة" : gateway.status())
                             + " | تسجيل الأمر في ديسكورد: " + (commandsRegistered ? "تم" : "لم يتم")
                             + " | عدد الحسابات المربوطة: " + store.total()));
             case "check" -> {

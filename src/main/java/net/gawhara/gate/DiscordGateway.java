@@ -32,7 +32,7 @@ final class DiscordGateway implements WebSocket.Listener {
             .build();
 
     private final String token;
-    private final int intents;
+    private volatile int intents;
     private final Handler handler;
     private final Logger log;
 
@@ -53,6 +53,10 @@ final class DiscordGateway implements WebSocket.Listener {
     private volatile Integer seq;
     private ScheduledFuture<?> heartbeat;
     private int failures;
+    private volatile boolean acked = true;
+    private volatile boolean connected;
+    private volatile boolean degraded;
+    private volatile String lastClose = "-";
     private final java.util.concurrent.atomic.AtomicBoolean reconnecting = new java.util.concurrent.atomic.AtomicBoolean();
 
     DiscordGateway(String token, int intents, Handler handler, Logger log) {
@@ -64,6 +68,12 @@ final class DiscordGateway implements WebSocket.Listener {
 
     void start() {
         sched.execute(this::connect);
+    }
+
+    /** وصف مختصر لحالة الاتصال (يظهر في /gate status). */
+    String status() {
+        return (connected ? "متصلة" : "غير متصلة") + (degraded ? " (الرسائل الخاصة فقط)" : "")
+                + " | آخر إغلاق: " + lastClose;
     }
 
     void stop() {
@@ -130,6 +140,26 @@ final class DiscordGateway implements WebSocket.Listener {
         }
     }
 
+    /** نبضة دورية: إن لم يردّ ديسكورد على النبضة السابقة فالاتصال ميّت ويُعاد بناؤه. */
+    private void beat(WebSocket ws) {
+        if (ws != socket || stopped) {
+            return;
+        }
+        if (!acked) {
+            log.warning("لم يردّ ديسكورد على نبضة الاتصال، سيُعاد الاتصال تلقائيًا...");
+            connected = false;
+            try {
+                ws.abort();
+            } catch (RuntimeException ignored) {
+                // لا شيء
+            }
+            reconnectLater();
+            return;
+        }
+        acked = false;
+        sendHeartbeat(ws);
+    }
+
     private void sendHeartbeat(WebSocket ws) {
         JsonObject o = new JsonObject();
         o.addProperty("op", 1);
@@ -187,11 +217,13 @@ final class DiscordGateway implements WebSocket.Listener {
             case 10 -> {
                 long interval = o.getAsJsonObject("d").get("heartbeat_interval").getAsLong();
                 cancelHeartbeat();
-                heartbeat = sched.scheduleAtFixedRate(() -> sendHeartbeat(ws),
+                acked = true;
+                heartbeat = sched.scheduleAtFixedRate(() -> beat(ws),
                         (long) (interval * Math.random()), interval, TimeUnit.MILLISECONDS);
                 sched.execute(() -> identify(ws));
             }
             case 1 -> sched.execute(() -> sendHeartbeat(ws));
+            case 11 -> acked = true;
             case 7, 9 -> {
                 // طلب إعادة اتصال أو جلسة غير صالحة
                 try {
@@ -205,6 +237,8 @@ final class DiscordGateway implements WebSocket.Listener {
                 JsonObject d = o.has("d") && o.get("d").isJsonObject() ? o.getAsJsonObject("d") : new JsonObject();
                 if (t.equals("READY")) {
                     failures = 0;
+                    connected = true;
+                    acked = true;
                     log.info("اتصل البوت ببوابة ديسكورد بنجاح.");
                     String appId = d.getAsJsonObject("application").get("id").getAsString();
                     work.execute(() -> handler.onReady(appId));
@@ -223,14 +257,34 @@ final class DiscordGateway implements WebSocket.Listener {
         if (ws != socket) {
             return null;
         }
+        connected = false;
+        lastClose = statusCode + (reason == null || reason.isBlank() ? "" : " " + reason);
+        cancelHeartbeat();
         if (statusCode == 4004) {
             log.severe("رفضت ديسكورد رمز البوت (4004). تحقق من discord.bot-token ثم نفّذ /gate reload");
             stopped = true;
             return null;
         }
         if (statusCode == 4013 || statusCode == 4014) {
-            log.severe("رفضت ديسكورد الصلاحيات المطلوبة (" + statusCode + "). إن فعّلت قناة الربط (link.channel-id) "
-                    + "فشغّل Message Content Intent من Developer Portal ← Bot، أو اتركها فارغة واستخدم الرسائل الخاصة فقط.");
+            // Message Content Intent غير مفعّل في Developer Portal: لا نوقف البوت كله،
+            // بل نكمل بالرسائل الخاصة فقط (لا تحتاج صلاحية خاصة)
+            int fallback = intents & ~((1 << 9) | (1 << 15));
+            if (fallback != intents && fallback != 0) {
+                intents = fallback;
+                degraded = true;
+                log.severe("رفضت ديسكورد الصلاحيات المطلوبة (" + statusCode + "): خيار Message Content Intent غير مفعّل. "
+                        + "سيستمر الربط عبر الرسائل الخاصة فقط، وقناة الربط معطّلة. لتفعيلها: Developer Portal ← Bot ← "
+                        + "Message Content Intent ثم /gate reload.");
+                reconnectLater();
+                return null;
+            }
+            log.severe("رفضت ديسكورد الصلاحيات المطلوبة (" + statusCode + "). فعّل الخيارات المطلوبة من Developer Portal ← Bot "
+                    + "ثم نفّذ /gate reload");
+            stopped = true;
+            return null;
+        }
+        if (statusCode == 4010 || statusCode == 4011 || statusCode == 4012) {
+            log.severe("أغلقت ديسكورد الاتصال برمز غير قابل للإصلاح (" + statusCode + ").");
             stopped = true;
             return null;
         }
@@ -243,6 +297,8 @@ final class DiscordGateway implements WebSocket.Listener {
         if (ws != socket) {
             return;
         }
+        connected = false;
+        lastClose = "error: " + error.getMessage();
         log.warning("خطأ في اتصال ديسكورد: " + error.getMessage());
         reconnectLater();
     }
